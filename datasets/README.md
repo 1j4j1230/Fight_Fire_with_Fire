@@ -75,4 +75,4 @@ The dataset is available at Google Drive. The below datasets contains various da
 
 # Results for Detecting Defense-aware Attacks	
 
-Here are daptive attack results of our method and UDF:   [Google Drive](https://drive.google.com/file/d/1jlh6xO5XLYc__P5JyAFqYcKp-7R76IgK/view?usp=sharing) 
+Here are adaptive attack results of our method and UDF(including adaptive attack patches, generated adversarial samples, and detection results after using defense patches or UDF.):   [Google Drive](https://drive.google.com/file/d/1jlh6xO5XLYc__P5JyAFqYcKp-7R76IgK/view?usp=sharing) 
