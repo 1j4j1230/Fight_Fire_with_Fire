@@ -65,8 +65,8 @@ The dataset is available at Google Drive. The below datasets contains various da
 
 |    Detector    |                             Link                             |
 | :------------: | :----------------------------------------------------------: |
-| YOLOv3 - train | [Google Drive](https://drive.google.com/file/d/16hYNzr3VaphrvTO0tfw8Jj7soZ8N26Oy/view?usp=sharing) |
-| YOLOv3 - test  | [Google Drive](https://drive.google.com/file/d/1tjmhOTQVyggMU5feFqE9nnddVRBv1ry-/view?usp=sharing) |
+| YOLOv3 - Test  | [Google Drive](https://drive.google.com/file/d/1tjmhOTQVyggMU5feFqE9nnddVRBv1ry-/view?usp=sharing) |
+| YOLOv3 - Train | [Google Drive](https://drive.google.com/file/d/16hYNzr3VaphrvTO0tfw8Jj7soZ8N26Oy/view?usp=sharing) |
 
 
 
