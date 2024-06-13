@@ -62,11 +62,19 @@ The dataset is available at Google Drive. The below datasets contains various da
 
 
 
+## Test Sets
 
-|    Detector    |                             Link                             |
-| :------------: | :----------------------------------------------------------: |
-| YOLOv3 - Test  | [Google Drive](https://drive.google.com/file/d/1tjmhOTQVyggMU5feFqE9nnddVRBv1ry-/view?usp=sharing) |
-| YOLOv3 - Train | [Google Drive](https://drive.google.com/file/d/16hYNzr3VaphrvTO0tfw8Jj7soZ8N26Oy/view?usp=sharing) |
+
+| Detector |                             Link                             |
+| :------: | :----------------------------------------------------------: |
+|  YOLOv3  | [Google Drive](https://drive.google.com/file/d/1tjmhOTQVyggMU5feFqE9nnddVRBv1ry-/view?usp=sharing) |
+
+## Train Sets
+
+
+| Detector |                             Link                             |
+| :------: | :----------------------------------------------------------: |
+|  YOLOv3  | [Google Drive](https://drive.google.com/file/d/16hYNzr3VaphrvTO0tfw8Jj7soZ8N26Oy/view?usp=sharing) |
 
 
 
@@ -75,4 +83,6 @@ The dataset is available at Google Drive. The below datasets contains various da
 
 # Adversarial Samples and Detection Results for Detecting Defense-aware Attacks	
 
-Here are adaptive attack results of our method and UDF(including adaptive attack patches, generated adversarial samples, and detection results after using defense patches or UDF.):   [Google Drive](https://drive.google.com/file/d/1jlh6xO5XLYc__P5JyAFqYcKp-7R76IgK/view?usp=sharing) 
+Here are adaptive attack results of our method and UDF (including adaptive attack patches, generated adversarial samples, and detection results after using defense patches or UDF): 
+
+  [Google Drive](https://drive.google.com/file/d/1jlh6xO5XLYc__P5JyAFqYcKp-7R76IgK/view?usp=sharing) 
