@@ -86,3 +86,6 @@ The dataset is available at Google Drive. The below datasets contains various da
 Here are adaptive attack results of our method and UDF (including adaptive attack patches, generated adversarial samples, and detection results after using defense patches or UDF): 
 
   [Google Drive](https://drive.google.com/file/d/1cUHzTF4hWy93MUEkDACwc3UdERhW39Wl/view?usp=sharing) 
+
+Here we provide the adaptive attack experimental results of version v2:
+  [Google Drive](https://drive.google.com/file/d/1Df8zQ7xjtKa2TcFSwtKoMFMe0MBFtYjQ/view?usp=sharing) 
