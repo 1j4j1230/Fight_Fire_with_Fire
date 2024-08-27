@@ -5,10 +5,10 @@ There are four adversarial examples with multi-patch attacks.
 Among these four sets of examples, both Canary and Woodpecker defenses successfully detect the adversarial patch attacks.
 
 
-### Sample 000377
 
-Shown in the image "000377_adv.jpg", there are eight people present in the image, with 8 adversarial patches introduced, resulting in three individuals being hidden.
+<a href="https://github.com/1j4j1230/Fight_Fire_with_Fire/blob/main/Response/D-Q3/000377_adv.jpg">000377_adv.jpg</a> : eight people in the image with eight adversarial patches, resulting in three individuals being hidden.
 
-Show in the image "000377_canary.jpg," we introduced two Canary Patches. Both Canary Patches failed to be correctly recognized, leading to the detection of adversarial patch attacks.
+<a href="https://github.com/1j4j1230/Fight_Fire_with_Fire/blob/main/Response/D-Q3/000377_canary.jpg">000377_canary.jpg</a> : two Canary patches are not correctly recognized, <font color="Red">**adversarial patch attacks Detected!**</font>
 
-Show in the image "000377_cwoodpecker.jpg," we introduced two Woodpecker Patches. Two individuals were newly detected, which also led to the detection of adversarial patch attacks.
+<a href="https://github.com/1j4j1230/Fight_Fire_with_Fire/blob/main/Response/D-Q3/000377_woodpecker.jpg">000377_woodpecker.jpg</a> : two individuals are not newly detected, <font color="Red">**adversarial patch attacks Detected!**</font>
+
