@@ -26,7 +26,7 @@ Among these four sets of examples, both Canary and Woodpecker defenses successfu
 
 <a href="https://github.com/1j4j1230/Fight_Fire_with_Fire/blob/main/Response/D-Q3/003858_canary.jpg">003858_canary.jpg</a> : three Canary patches are not correctly recognized, <font color="Red">**adversarial patch attacks Detected!**</font>
 
-<a href="https://github.com/1j4j1230/Fight_Fire_with_Fire/blob/main/Response/D-Q3/003858_woodpecker.jpg">003858_woodpecker.jpg</a> : three individuals are newly detected, <font color="Red">**adversarial patch attacks Detected!**</font>
+<a href="https://github.com/1j4j1230/Fight_Fire_with_Fire/blob/main/Response/D-Q3/003858_woodpecker.jpg">003858_woodpecker.jpg</a> : two individuals are newly detected, <font color="Red">**adversarial patch attacks Detected!**</font>
 
 ### Sample 006505
 
