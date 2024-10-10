@@ -2,7 +2,7 @@
 
 Code for "Fight Fire with Fire: Combating Adversarial Patch Attacks using Pattern-randomized Defensive Patches" in IEEE S&P 2025
 
-![](.\assets\idea.jpg)
+![](./assets/idea.jpg)
 
 ## Requirements
 
