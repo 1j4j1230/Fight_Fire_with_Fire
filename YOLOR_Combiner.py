@@ -1,0 +1,878 @@
+import os
+import cv2
+import torch
+import random
+import warnings
+import argparse
+import datetime
+import shutil
+import numpy as np
+import matplotlib.pyplot as plt
+from copy import deepcopy
+import json
+import numpy as np
+import torch.optim as optim
+import matplotlib.pyplot as plt
+from torchvision import transforms
+from torch.utils.data import Dataset
+from ObjectDetector.fjn_yolor import *
+from ObjectDetector.yolor.utils.datasets import letterbox
+from ObjectDetector.yolor.utils.loss import compute_loss
+
+warnings.filterwarnings('ignore')
+
+
+
+def xywh2xyxy(single_box):
+    res = [0, 0, 0, 0]
+    res[0] = single_box[0] - single_box[2] / 2
+    res[2] = single_box[0] + single_box[2] / 2
+    res[1] = single_box[1] - single_box[3] / 2
+    res[3] = single_box[1] + single_box[3] / 2
+    return res
+
+def is_overlap(box1, box2, xyxy=True):
+    if not xyxy:
+        box1 = xywh2xyxy(box1)
+        box2 = xywh2xyxy(box2)
+    start_x_1, start_y_1, end_x_1, end_y_1 = box1
+    start_x_2, start_y_2, end_x_2, end_y_2 = box2
+    return not ((start_x_1 > end_x_2) or (start_x_2 > end_x_1) or (start_y_1 > end_y_2) or (start_y_2 > end_y_1))
+
+def ca_reformat_to_label(patch_label, original_label):
+    all_label = []
+    for b_id in range(len(patch_label)):
+        for single_patch_label in patch_label[b_id]:
+            tmp_label = [b_id, single_patch_label[0], single_patch_label[1], single_patch_label[2],
+                         single_patch_label[3], single_patch_label[4]]
+            all_label.append(tmp_label)
+        if original_label is not None:
+            for single_label in original_label[b_id]:
+                if single_label[0] == -1:
+                    break
+                else:
+                    tmp_label = [b_id, single_label[0], single_label[1], single_label[2], single_label[3],
+                                 single_label[4]]
+                    all_label.append(tmp_label)
+
+    return torch.from_numpy(np.array(all_label))
+
+class CanaryYoloRDataset(Dataset):
+    def __init__(self, benign_root, adversarial_root, benign_label_root, img_size):
+        self.benign_root = benign_root
+        self.benign_label_root = benign_label_root
+        self.adversarial_root = adversarial_root
+        self.img_size = img_size
+        self.img_benign_ls = os.listdir(self.benign_root)
+        self.img_adversarial_ls = os.listdir(self.adversarial_root)
+        assert len(self.img_benign_ls) == len(self.img_adversarial_ls), 'the number of benign images should equal to adversarial images'
+        self.img_ls_len = len(self.img_benign_ls)
+        self.max_original_label_num = 20
+
+    def __len__(self):
+        return self.img_ls_len
+
+    def trans_img_to_tensor(self, img_benign_ori):
+        img_benign = letterbox(img_benign_ori, (960, 1280), auto=False, scaleFill=True)[0]
+        img_benign = img_benign[:, :, ::-1].transpose(2, 0, 1)
+        img_benign = np.ascontiguousarray(img_benign)
+        img_benign = torch.from_numpy(img_benign).float() / 255.0
+        return img_benign
+
+    def __getitem__(self, idx):
+        img_name = self.img_benign_ls[idx % self.img_ls_len]
+        img_benign_path = os.path.join(self.benign_root, img_name)
+        img_benign_ori = cv2.imread(img_benign_path, 1)
+        img_benign = self.trans_img_to_tensor(img_benign_ori)
+        label_benign_txt_name = img_name.split('.')[0] + '.txt'
+        label_benign = self.read_benign_label(os.path.join(self.benign_label_root, label_benign_txt_name))
+        img_adversarial_path = os.path.join(self.adversarial_root, img_name)
+        img_adversarial_ori = cv2.imread(img_adversarial_path, 1)
+        img_adversarial = self.trans_img_to_tensor(img_adversarial_ori)
+        return img_benign, label_benign, img_adversarial
+
+    def reformat_patch_area(self, place_np):
+        max_place_num = self.max_original_label_num
+        place_np_res = np.zeros((max_place_num, 4))
+        if len(place_np.shape) == 0 or len(place_np) == 0:
+            return place_np_res
+        else:
+            if len(place_np.shape) == 1:
+                place_np = np.expand_dims(place_np, axis=0)
+            for i in range(place_np.shape[0]):
+                if i >= max_place_num:
+                    break
+                place_np_res[i] = place_np[i]
+            return place_np_res
+
+    def read_benign_label(self, label_path):
+        label = np.loadtxt(label_path)
+        if len(label) == 0:
+            label = np.array([[-1, 0, 0, 0, 0]])
+        elif len(label.shape) == 1:
+            label = np.expand_dims(label, axis=0)
+        label_tensor = torch.zeros((self.max_original_label_num, 5))
+        label_tensor[:, 0] = -1
+        for i in range(label.shape[0]):
+            if i < self.max_original_label_num:
+                label_tensor[i][0] = label[i][0]
+                label_tensor[i][1] = label[i][1]
+                label_tensor[i][2] = label[i][2]
+                label_tensor[i][3] = label[i][3]
+                label_tensor[i][4] = label[i][4]
+        return label_tensor
+
+
+class Canary:
+    def __init__(self, cfg, detector):
+        self.cfg = cfg
+        self.detector = detector
+        self.detector.set_hyp()
+        self.detector.model.gr = 1.0
+        self.detector.model.nc = 80
+        self.img_size = self.cfg.img_size
+        self.person_conf = self.cfg.person_conf
+        self.overlap_thresh = self.cfg.overlap_thresh
+        self.data_loader = None
+        self.canary_tensor = None
+        self.canary_save_path = ''
+        self.eval_canary = None
+        self.canary_size = self.cfg.canary_size
+        self.canary_cls_id = self.cfg.canary_cls_id
+        self.eval_no_overlap = self.cfg.eval_no_overlap
+        self.margin_size = self.cfg.margin_size
+        self.faster = self.cfg.faster
+        pass
+
+    def train(self):
+        optimizer = optim.Adam([self.canary_tensor], lr=self.cfg.learing_rate, amsgrad=True)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.cfg.epoch)
+        t = tqdm(total=self.cfg.epoch, ascii=True)
+        for epoch in range(1, self.cfg.epoch + 1):
+            t.set_description((f'canary_{self.cfg.weight} epoch: {epoch}/{self.cfg.epoch}'))
+            for i_batch, (benign_input_tensor, benign_label, adv_input_tensor) in enumerate(self.data_loader):
+                benign_input_tensor = benign_input_tensor.requires_grad_(False).cuda()
+                adv_input_tensor = adv_input_tensor.requires_grad_(False).cuda()
+                self.detector.model.eval()
+                adv_input_canary_tensor, adv_canary_clsxywh = self.add_canary_into_img_tensor(adv_input_tensor)
+                benign_input_canary_tensor, benign_canary_clsxywh = self.add_canary_into_img_tensor(benign_input_tensor)
+                self.detector.model.train()
+                benign_label_clsxywh = ca_reformat_to_label(patch_label=benign_canary_clsxywh, original_label=None).cuda()
+                adv_label_clsxywh = ca_reformat_to_label(patch_label=adv_canary_clsxywh, original_label=None).cuda()
+                benign_outputs = self.detector.model(benign_input_canary_tensor)
+                benign_box_l, benign_obj_l, benign_cls_l = compute_loss(benign_outputs, benign_label_clsxywh, self.detector.model)
+                adv_outputs = self.detector.model(adv_input_canary_tensor)
+                adv_hidden_box_l, adv_hidden_obj_l, adv_hidden_cls_l = compute_loss(adv_outputs, adv_label_clsxywh, self.detector.model)
+                benign_loss = benign_obj_l + benign_cls_l + benign_box_l
+                adv_loss = adv_hidden_obj_l + adv_hidden_cls_l + adv_hidden_box_l
+                loss = self.cfg.weight * benign_loss - adv_loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                self.canary_tensor.requires_grad_(True)
+                self.canary_tensor.data.clamp_(0.0001, 1)
+                t.set_postfix({
+                    'b_box': '{0:1.4f}'.format(benign_box_l.cpu().item() / len(self.data_loader)),
+                    'b_obj': '{0:1.4f}'.format(benign_obj_l.cpu().item() / len(self.data_loader)),
+                    'b_cls': '{0:1.4f}'.format(benign_cls_l.cpu().item() / len(self.data_loader)),
+                    'b_loss': '{0:1.4f}'.format(benign_loss.cpu().item() / len(self.data_loader)),
+                    'a_box': '{0:1.4f}'.format(adv_hidden_box_l.cpu().item() / len(self.data_loader)),
+                    'a_obj': '{0:1.4f}'.format(adv_hidden_obj_l.cpu().item() / len(self.data_loader)),
+                    'a_cls': '{0:1.4f}'.format(adv_hidden_cls_l.cpu().item() / len(self.data_loader)),
+                    'a_loss': '{0:1.4f}'.format(adv_loss.cpu().item() / len(self.data_loader))
+                })
+            if epoch % self.cfg.epoch_save == 0:
+                self.save_canary(epoch)
+            t.update(1)
+            scheduler.step()
+        t.close()
+        pass
+
+    def add_canary_into_img_tensor(self, img_tensor):
+        add_canary_clsxywh = []
+        for bi in range(img_tensor.shape[0]):
+            possible_person = self.detector.FindHiddenPerson(img_tensor[bi:bi + 1, ::], person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster)
+            tmp_canary_clsxywh = []
+            if len(possible_person) > 0:
+                for single_possible in possible_person:
+                    start_x = int((single_possible[0] + single_possible[2]) // 2 - self.canary_tensor.shape[-2] // 2)
+                    start_y = int((single_possible[1] + single_possible[3]) // 2 - self.canary_tensor.shape[-1] // 2)
+                    location_y, location_x = self.cfg.defensive_patch_location[0], cfg.defensive_patch_location[1]
+                    if location_y == 'u':
+                        start_y = start_y - 60
+                    elif location_y == 'c':
+                        start_y = start_y
+                    elif location_y == 'b':
+                        start_y = start_y + 60
+                    else:
+                        raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: y ', cfg.defensive_patch_location)
+                    if location_x == 'l':
+                        start_x = start_x - 60
+                    elif location_x == 'c':
+                        start_x = start_x
+                    elif location_x == 'r':
+                        start_x = start_x + 60
+                    else:
+                        raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: x ', cfg.defensive_patch_location)
+                    end_x = int(start_x + self.canary_tensor.shape[-2])
+                    end_y = int(start_y + self.canary_tensor.shape[-1])
+                    shift_x = random.randint(-10, 10)
+                    shift_y = random.randint(-10, 10)
+                    start_y, end_y = start_y + shift_y, end_y + shift_y
+                    start_x, end_x = start_x + shift_x, end_x + shift_x
+                    if end_y > img_tensor.shape[2]:
+                        end_y = img_tensor.shape[2] - self.margin_size
+                        start_y = end_y - self.canary_tensor.shape[-1]
+                    if end_x > img_tensor.shape[3]:
+                        end_x = img_tensor.shape[3] - self.margin_size
+                        start_x = end_x - self.canary_tensor.shape[-2]
+                    if start_y < 0:
+                        start_y = self.margin_size
+                        end_y = self.canary_tensor.shape[-1] + self.margin_size
+                    if start_x < 0:
+                        start_x = self.margin_size
+                        end_x = self.canary_tensor.shape[-2] + self.margin_size
+                    img_tensor[bi, :, start_y:end_y, start_x:end_x] = self.canary_tensor
+                    tmp_canary_clsxywh.append([self.canary_cls_id, (start_x + end_x) / 2 / img_tensor.shape[3],
+                                               (start_y + end_y) / 2 / img_tensor.shape[2],
+                                               self.canary_tensor.shape[-2] / img_tensor.shape[3],
+                                               self.canary_tensor.shape[-1] / img_tensor.shape[2]])
+                pass
+            else:
+                start_x = random.randint(self.canary_tensor.shape[-2] + self.margin_size,
+                                         img_tensor.shape[3] - self.canary_tensor.shape[-2] - self.margin_size)
+                start_y = random.randint(self.canary_tensor.shape[-1] + self.margin_size,
+                                         img_tensor.shape[2] - self.canary_tensor.shape[-1] - self.margin_size)
+                end_x = start_x + self.canary_tensor.shape[-2]
+                end_y = start_y + self.canary_tensor.shape[-1]
+                img_tensor[bi, :, start_y:end_y, start_x:end_x] = self.canary_tensor
+                tmp_canary_clsxywh.append([self.canary_cls_id, (start_x + end_x) / 2 / img_tensor.shape[3],
+                                           (start_y + end_y) / 2 / img_tensor.shape[2],
+                                           self.canary_tensor.shape[-2] / img_tensor.shape[3],
+                                           self.canary_tensor.shape[-1] / img_tensor.shape[2]])
+                pass
+            add_canary_clsxywh.append(tmp_canary_clsxywh)
+        return img_tensor, add_canary_clsxywh
+
+    def save_canary(self, epoch):
+        canary_img_RGB = transforms.ToPILImage('RGB')(self.canary_tensor)
+        canary_img_RGB = np.array(canary_img_RGB).astype(np.uint8)
+        canary_img_BGR = cv2.cvtColor(canary_img_RGB, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(f'{self.canary_save_path}', f'canary_{str(epoch).zfill(3)}.png'), canary_img_BGR)
+        del canary_img_BGR
+        pass
+
+    def eval_single(self, img_cv):
+        possible_person_ls = self.detector.FindHiddenPerson(img_cv, person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20, shown=shown)
+        img_sized = letterbox(img_cv, 1280)[0]
+        if possible_person_ls is not None and len(possible_person_ls):
+            possible_person_ls[:, :4] = scale_coords_np(img_cv.shape, possible_person_ls[:, :4], img_sized.shape).round()
+        if len(possible_person_ls) == 0 or (np.count_nonzero(possible_person_ls) == 0):
+            is_attack = False
+        else:
+            img_original_result = self.detector.detect_single(img_cv)
+            original_canary_result = img_original_result[np.where(img_original_result[:, -1] == self.canary_cls_id)]
+            img_sized_with_canary = copy.deepcopy(img_sized)
+            img_sized_with_canary, canary_area = self.eval_add_canary_into_img(img_sized_with_canary, possible_person_ls)
+            img_with_canary_result = self.detector.detect_single(img_sized_with_canary)
+            canary_result = img_with_canary_result[np.where(img_with_canary_result[:, -1] == self.canary_cls_id)]
+            canary_original_num = len(original_canary_result)
+            canary_put_num = len(canary_area)
+            canary_detected_num = len(canary_result)
+            if canary_original_num + canary_put_num == canary_detected_num:
+                is_attack = False
+            else:
+                is_attack = True
+        return is_attack
+
+    def eval_add_canary_into_img(self, img_sized_with_canary, possible_person_ls):
+        def xywh2xyxy(single_box):
+            res = [0, 0, 0, 0]
+            res[0] = single_box[0] - single_box[2] / 2
+            res[2] = single_box[0] + single_box[2] / 2
+            res[1] = single_box[1] - single_box[3] / 2
+            res[3] = single_box[1] + single_box[3] / 2
+            return res
+        def tmp_fun_is_overlap(box1, box2, xyxy=True):
+            if not xyxy:
+                box1 = xywh2xyxy(box1)
+                box2 = xywh2xyxy(box2)
+            start_x_1, start_y_1, end_x_1, end_y_1 = box1
+            start_x_2, start_y_2, end_x_2, end_y_2 = box2
+            return not ((start_x_1 > end_x_2) or (start_x_2 > end_x_1) or (start_y_1 > end_y_2) or (start_y_2 > end_y_1))
+        canary_area = []
+        if self.eval_no_overlap:
+            add_box = []
+            for idx, item in enumerate(possible_person_ls):
+                if np.count_nonzero(item) == 0:
+                    continue
+                if idx == 0:
+                    add_box.append(item)
+                else:
+                    tmp_is_overlap = False
+                    for added_item in add_box:
+                        item_box = [(item[0] + item[2]) // 2, (item[1] + item[3]) // 2, self.eval_canary.shape[1], self.eval_canary.shape[0]]
+                        add_item_box = [(added_item[0] + added_item[2]) // 2, (added_item[1] + added_item[3]) // 2, self.eval_canary.shape[1], self.eval_canary.shape[0]]
+
+                        if tmp_fun_is_overlap(item_box, add_item_box, xyxy=False):
+                            tmp_is_overlap = True
+                            break
+                    if not tmp_is_overlap:
+                        add_box.append(item)
+                    pass
+                pass
+            possible_person_ls = add_box
+        for single_person_xyxy in possible_person_ls:
+            if np.count_nonzero(single_person_xyxy) == 0:
+                continue
+            start_x = int((single_person_xyxy[0] + single_person_xyxy[2]) // 2 - self.eval_canary.shape[1] // 2)
+            start_y = int((single_person_xyxy[1] + single_person_xyxy[3]) // 2 - self.eval_canary.shape[0] // 2)
+            location_y, location_x = self.cfg.defensive_patch_location[0], self.cfg.defensive_patch_location[1]
+            if location_y == 'u':
+                start_y = start_y - 60
+            elif location_y == 'c':
+                start_y = start_y
+            elif location_y == 'b':
+                start_y = start_y + 60
+            else:
+                raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: y ', cfg.defensive_patch_location)
+            if location_x == 'l':
+                start_x = start_x - 60
+            elif location_x == 'c':
+                start_x = start_x
+            elif location_x == 'r':
+                start_x = start_x + 60
+            else:
+                raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: x ', cfg.defensive_patch_location)
+            end_x = int(start_x + self.eval_canary.shape[1])
+            end_y = int(start_y + self.eval_canary.shape[0])
+            if end_y > img_sized_with_canary.shape[0]:
+                end_y = img_sized_with_canary.shape[0] - self.margin_size
+                start_y = end_y - self.eval_canary.shape[0]
+            if end_x > img_sized_with_canary.shape[1]:
+                end_x = img_sized_with_canary.shape[1] - self.margin_size
+                start_x = end_x - self.eval_canary.shape[1]
+            if start_y < 0:
+                start_y = self.margin_size
+                end_y = self.eval_canary.shape[0] + self.margin_size
+            if start_x < 0:
+                start_x = self.margin_size
+                end_x = self.eval_canary.shape[1] + self.margin_size
+            canary_area.append([start_x, start_y, end_x, end_y])
+            img_sized_with_canary[start_y:end_y, start_x:end_x, :] = self.eval_canary
+        return img_sized_with_canary, canary_area
+
+    def eval_load_canary(self, canary_path, canary_cls_id):
+        canary_img = cv2.imread(canary_path, 1)
+        if canary_img.shape[0] != self.canary_size and canary_img.shape[1] != self.canary_size:
+            canary_img = cv2.resize(canary_img, (self.canary_size, self.canary_size))
+        self.eval_canary = canary_img
+        self.canary_cls_id = canary_cls_id
+        print(f'Load canary({canary_cls_id}) for eval: {canary_path}')
+        pass
+
+    def init_dataloader(self):
+        train_dataset = CanaryYoloRDataset(self.cfg.benign_root, self.cfg.adversarial_root, self.cfg.benign_label_root,
+                                           self.img_size)
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=True,
+                                                   num_workers=self.cfg.num_works, drop_last=True)
+        self.data_loader = train_loader
+        pass
+
+    def init_canary(self):
+        if self.cfg.canary_init and os.path.exists(os.path.join(self.cfg.canary_init_path, f'{self.cfg.canary_cls_id}.jpg')):
+            canary_img = cv2.imread(os.path.join(self.cfg.canary_init_path, f'{self.cfg.canary_cls_id}.jpg'), 1)
+            canary_img = cv2.cvtColor(canary_img, cv2.COLOR_BGR2RGB)
+            canary_img = cv2.resize(canary_img, (self.canary_size, self.canary_size))
+            canary_img = np.transpose(canary_img, (2, 0, 1)) / 255.
+        else:
+            canary_img = np.ones((3, self.canary_size, self.canary_size)) * 0.5
+        self.canary_img = canary_img
+        canary_tensor = torch.from_numpy(canary_img)
+        self.canary_tensor = canary_tensor.requires_grad_(True)
+        self.canary_cls_id = self.cfg.canary_cls_id
+        fold_name = f'canary_{self.cfg.defensive_patch_location}_{self.cfg.attack_name}_{self.cfg.detect_name}_{self.cfg.weight}_{self.cfg.batch_size}'
+        canary_fold = f'exp_{self.cfg.data_name}_{self.cfg.canary_cls_id}_{self.canary_size}_{self.cfg.epoch}'
+        self.canary_save_path = os.path.join('./FJNTraining', fold_name, canary_fold)
+        os.makedirs(self.canary_save_path, exist_ok=True)
+        del canary_img, fold_name, canary_fold
+        self.save_canary(0)
+        pass
+
+
+def wd_reformat_to_label(original_label):
+    all_label = []
+    for b_id in range(len(original_label)):
+        for single_label in original_label[b_id]:
+            if single_label[0] == -1:
+                break
+            else:
+                tmp_label = [b_id, single_label[0], single_label[1], single_label[2], single_label[3],
+                             single_label[4]]
+                all_label.append(tmp_label)
+    return torch.from_numpy(np.array(all_label))
+
+class WdYoloRDataset(Dataset):
+    def __init__(self, benign_root, adversarial_root, benign_label_root, img_size):
+        self.benign_root = benign_root
+        self.benign_label_root = benign_label_root
+        self.adversarial_root = adversarial_root
+        self.img_size = img_size
+        self.img_benign_ls = os.listdir(self.benign_root)
+        self.img_adversarial_ls = os.listdir(self.adversarial_root)
+        assert len(self.img_benign_ls) == len(
+            self.img_adversarial_ls), 'the number of benign images should equal to adversarial images'
+        self.img_ls_len = len(self.img_benign_ls)
+        self.max_original_label_num = 20
+
+    def __len__(self):
+        return self.img_ls_len
+
+    def trans_img_to_tensor(self, img_benign_ori):
+        img_benign = letterbox(img_benign_ori, (960, 1280), auto=False, scaleFill=True)[0]
+        img_benign = img_benign[:, :, ::-1].transpose(2, 0, 1)
+        img_benign = np.ascontiguousarray(img_benign)
+        img_benign = torch.from_numpy(img_benign).float() / 255.0
+        return img_benign
+
+    def __getitem__(self, idx):
+        img_name = self.img_benign_ls[idx % self.img_ls_len]
+        img_benign_path = os.path.join(self.benign_root, img_name)
+        img_benign_ori = cv2.imread(img_benign_path, 1)
+        img_benign = self.trans_img_to_tensor(img_benign_ori)
+        label_benign_txt_name = img_name.split('.')[0] + '.txt'
+        label_benign = self.read_benign_label(os.path.join(self.benign_label_root, label_benign_txt_name))
+        img_adversarial_path = os.path.join(self.adversarial_root, img_name)
+        img_adversarial_ori = cv2.imread(img_adversarial_path, 1)
+        img_adversarial = self.trans_img_to_tensor(img_adversarial_ori)
+        return img_benign, label_benign, img_adversarial
+
+    def reformat_patch_area(self, place_np):
+        max_place_num = self.max_original_label_num
+        place_np_res = np.zeros((max_place_num, 4))
+        if len(place_np.shape) == 0 or len(place_np) == 0:
+            return place_np_res
+        else:
+            if len(place_np.shape) == 1:
+                place_np = np.expand_dims(place_np, axis=0)
+            for i in range(place_np.shape[0]):
+                if i >= max_place_num:
+                    break
+                place_np_res[i] = place_np[i]
+            return place_np_res
+
+    def read_benign_label(self, label_path):
+        label = np.loadtxt(label_path)
+        if len(label) == 0:
+            label = np.array([[-1, 0, 0, 0, 0]])
+        elif len(label.shape) == 1:
+            label = np.expand_dims(label, axis=0)
+        label_tensor = torch.zeros((self.max_original_label_num, 5))
+        label_tensor[:, 0] = -1
+        for i in range(label.shape[0]):
+            if i < self.max_original_label_num:
+                label_tensor[i][0] = label[i][0]
+                label_tensor[i][1] = label[i][1]
+                label_tensor[i][2] = label[i][2]
+                label_tensor[i][3] = label[i][3]
+                label_tensor[i][4] = label[i][4]
+        return label_tensor
+
+
+class Woodpecker:
+    def __init__(self, cfg, detector):
+        self.cfg = cfg
+        self.detector = detector
+        self.detector.set_hyp()
+        self.detector.model.gr = 1.0
+        self.detector.model.nc = 80
+        self.img_size = self.cfg.img_size
+        self.person_conf = self.cfg.person_conf
+        self.overlap_thresh = self.cfg.overlap_thresh
+        self.data_loader = None
+        self.wd_tensor = None
+        self.wd_save_path = ''
+        self.eval_wd = None
+        self.wd_size = self.cfg.wd_size
+        self.eval_no_overlap = self.cfg.eval_no_overlap
+        self.margin_size = self.cfg.margin_size
+        self.faster = self.cfg.faster
+        pass
+
+    def train(self):
+        optimizer = optim.Adam([self.wd_tensor], lr=self.cfg.learing_rate, amsgrad=True)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.cfg.epoch)
+        t = tqdm(total=self.cfg.epoch, ascii=True)
+        for epoch in range(1, self.cfg.epoch + 1):
+            t.set_description((f'wd_{self.cfg.weight} epoch: {epoch}/{self.cfg.epoch}'))
+            for i_batch, (benign_input_tensor, benign_label, adv_input_tensor) in enumerate(self.data_loader):
+                benign_input_tensor = benign_input_tensor.requires_grad_(False).cuda()
+                adv_input_tensor = adv_input_tensor.requires_grad_(False).cuda()
+                adv_input_wd_tensor = self.add_wd_into_img_tensor(adv_input_tensor)
+                benign_input_wd_tensor = self.add_wd_into_img_tensor(benign_input_tensor)
+                benign_label_clsxywh = wd_reformat_to_label(original_label=benign_label).cuda()
+                self.detector.model.train()
+                benign_outputs = self.detector.model(benign_input_wd_tensor)
+                benign_box_l, benign_obj_l, benign_cls_l = compute_loss(benign_outputs, benign_label_clsxywh, self.detector.model)
+                adv_outputs = self.detector.model(adv_input_wd_tensor)
+                adv_hidden_box_l, adv_hidden_obj_l, adv_hidden_cls_l = compute_loss(adv_outputs, benign_label_clsxywh, self.detector.model)
+                benign_loss = benign_obj_l + benign_cls_l + benign_box_l
+                adv_loss = adv_hidden_obj_l + adv_hidden_cls_l + adv_hidden_box_l
+                loss = self.cfg.weight * benign_loss + adv_loss
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                self.wd_tensor.requires_grad_(True)
+                self.wd_tensor.data.clamp_(0.0001, 1)
+                t.set_postfix({
+                    'b_box': '{0:1.4f}'.format(benign_box_l.cpu().item() / len(self.data_loader)),
+                    'b_obj': '{0:1.4f}'.format(benign_obj_l.cpu().item() / len(self.data_loader)),
+                    'b_cls': '{0:1.4f}'.format(benign_cls_l.cpu().item() / len(self.data_loader)),
+                    'b_loss': '{0:1.4f}'.format(benign_loss.cpu().item() / len(self.data_loader)),
+                    'a_box': '{0:1.4f}'.format(adv_hidden_box_l.cpu().item() / len(self.data_loader)),
+                    'a_obj': '{0:1.4f}'.format(adv_hidden_obj_l.cpu().item() / len(self.data_loader)),
+                    'a_cls': '{0:1.4f}'.format(adv_hidden_cls_l.cpu().item() / len(self.data_loader)),
+                    'a_loss': '{0:1.5f}'.format(adv_loss.cpu().item() / len(self.data_loader))
+                })
+            if epoch % self.cfg.epoch_save == 0:
+                self.save_wd(epoch)
+            t.update(1)
+            scheduler.step()
+        t.close()
+        pass
+
+    def add_wd_into_img_tensor(self, img_tensor):
+        for bi in range(img_tensor.shape[0]):
+            possible_person = self.detector.FindHiddenPerson(img_tensor[bi:bi + 1, ::], person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster)
+            if len(possible_person) > 0:
+                for single_possible in possible_person:
+                    start_x = int((single_possible[0] + single_possible[2]) // 2 - self.wd_tensor.shape[-2] // 2)
+                    start_y = int((single_possible[1] + single_possible[3]) // 2 - self.wd_tensor.shape[-1] // 2)
+                    location_y, location_x = self.cfg.defensive_patch_location[0], cfg.defensive_patch_location[1]
+                    if location_y == 'u':
+                        start_y = start_y - 60
+                    elif location_y == 'c':
+                        start_y = start_y
+                    elif location_y == 'b':
+                        start_y = start_y + 60
+                    else:
+                        raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: y ', cfg.defensive_patch_location)
+                    if location_x == 'l':
+                        start_x = start_x - 60
+                    elif location_x == 'c':
+                        start_x = start_x
+                    elif location_x == 'r':
+                        start_x = start_x + 60
+                    else:
+                        raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: x ', cfg.defensive_patch_location)
+                    end_x = int(start_x + self.wd_tensor.shape[-2])
+                    end_y = int(start_y + self.wd_tensor.shape[-1])
+                    shift_x = random.randint(-10, 10)
+                    shift_y = random.randint(-10, 10)
+                    start_y, end_y = start_y + shift_y, end_y + shift_y
+                    start_x, end_x = start_x + shift_x, end_x + shift_x
+                    if end_y > img_tensor.shape[2]:
+                        end_y = img_tensor.shape[2] - self.margin_size
+                        start_y = end_y - self.wd_tensor.shape[-1]
+                    if end_x > img_tensor.shape[3]:
+                        end_x = img_tensor.shape[3] - self.margin_size
+                        start_x = end_x - self.wd_tensor.shape[-2]
+                    if start_y < 0:
+                        start_y = self.margin_size
+                        end_y = self.wd_tensor.shape[-1] + self.margin_size
+                    if start_x < 0:
+                        start_x = self.margin_size
+                        end_x = self.wd_tensor.shape[-2] + self.margin_size
+
+                    img_tensor[bi, :, start_y:end_y, start_x:end_x] = self.wd_tensor
+                pass
+        return img_tensor
+
+    def eval_single(self, img_cv):
+        possible_person_ls = self.detector.FindHiddenPerson(img_cv, person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster)
+        img_sized = letterbox(img_cv, 1280)[0]
+        if possible_person_ls is not None and len(possible_person_ls):
+            possible_person_ls[:, :4] = scale_coords_np(img_cv.shape, possible_person_ls[:, :4], img_sized.shape).round()
+        if len(possible_person_ls) == 0 or (np.count_nonzero(possible_person_ls) == 0):
+            return False
+        else:
+            img_original_result = self.detector.detect_single(img_sized)
+            detected_person_in_original_ls = img_original_result[np.where(img_original_result[:, -1] == 0)]
+            img_sized_with_wd = self.eval_add_wd_into_img(img_sized, possible_person_ls)
+            img_with_wd_result = self.detector.detect_single(img_sized_with_wd)
+            detected_person_in_wd_ls = img_with_wd_result[np.where(img_with_wd_result[:, -1] == 0)]
+            has_new_person = False
+            if len(detected_person_in_original_ls) == 0 and len(detected_person_in_wd_ls) == 0:
+                has_new_person = False
+            elif len(detected_person_in_original_ls) == 0 and len(detected_person_in_wd_ls) > 0:
+                has_new_person = True
+            else:
+                for new_single_person in detected_person_in_wd_ls:
+                    temp_ls = []
+                    for old_single_person in detected_person_in_original_ls:
+                        chongdie = self.cal_chongdie(new_single_person[:4], old_single_person[:4], x1y1x2y2=True)
+                        temp_ls.append(chongdie)
+                    if max(temp_ls) < 0.5:
+                        has_new_person = True
+                        break
+            return has_new_person
+
+    def eval_add_wd_into_img(self, img_sized_with_wd, possible_person_ls):
+        def xywh2xyxy(single_box):
+            res = [0, 0, 0, 0]
+            res[0] = single_box[0] - single_box[2] / 2
+            res[2] = single_box[0] + single_box[2] / 2
+            res[1] = single_box[1] - single_box[3] / 2
+            res[3] = single_box[1] + single_box[3] / 2
+            return res
+
+        def tmp_fun_is_overlap(box1, box2, xyxy=True):
+            if not xyxy:
+                box1 = xywh2xyxy(box1)
+                box2 = xywh2xyxy(box2)
+            start_x_1, start_y_1, end_x_1, end_y_1 = box1
+            start_x_2, start_y_2, end_x_2, end_y_2 = box2
+            return not ((start_x_1 > end_x_2) or (start_x_2 > end_x_1) or (start_y_1 > end_y_2) or (start_y_2 > end_y_1))
+
+        if self.eval_no_overlap:
+            add_box = []
+            for idx, item in enumerate(possible_person_ls):
+
+                if np.count_nonzero(item) == 0:
+                    continue
+
+                if idx == 0:
+                    add_box.append(item)
+                else:
+                    tmp_is_overlap = False
+                    for added_item in add_box:
+                        item_box = [(item[0] + item[2]) // 2, (item[1] + item[3]) // 2, self.eval_wd.shape[1], self.eval_wd.shape[0]]
+                        add_item_box = [(added_item[0] + added_item[2]) // 2, (added_item[1] + added_item[3]) // 2, self.eval_wd.shape[1], self.eval_wd.shape[0]]
+
+                        if tmp_fun_is_overlap(item_box, add_item_box, xyxy=False):
+                            tmp_is_overlap = True
+                            break
+                    if not tmp_is_overlap:
+                        add_box.append(item)
+                    pass
+                pass
+
+            possible_person_ls = add_box
+
+        for single_person_xyxy in possible_person_ls:
+
+            if np.count_nonzero(single_person_xyxy) == 0:
+                continue
+
+            start_x = int((single_person_xyxy[0] + single_person_xyxy[2]) // 2 - self.eval_wd.shape[1] // 2)
+            start_y = int((single_person_xyxy[1] + single_person_xyxy[3]) // 2 - self.eval_wd.shape[0] // 2)
+
+            location_y, location_x = self.cfg.defensive_patch_location[0], cfg.defensive_patch_location[1]
+
+            if location_y == 'u':
+                start_y = start_y - 60
+            elif location_y == 'c':
+                start_y = start_y
+            elif location_y == 'b':
+                start_y = start_y + 60
+            else:
+                raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: y ', cfg.defensive_patch_location)
+
+            if location_x == 'l':
+                start_x = start_x - 60
+            elif location_x == 'c':
+                start_x = start_x
+            elif location_x == 'r':
+                start_x = start_x + 60
+            else:
+                raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: x ', cfg.defensive_patch_location)
+
+            end_x = int(start_x + self.eval_wd.shape[1])
+            end_y = int(start_y + self.eval_wd.shape[0])
+
+            if end_y > img_sized_with_wd.shape[0]:
+                end_y = img_sized_with_wd.shape[0] - self.margin_size
+                start_y = end_y - self.eval_wd.shape[0]
+            if end_x > img_sized_with_wd.shape[1]:
+                end_x = img_sized_with_wd.shape[1] - self.margin_size
+                start_x = end_x - self.eval_wd.shape[1]
+            if start_y < 0:
+                start_y = self.margin_size
+                end_y = self.eval_wd.shape[0] + self.margin_size
+            if start_x < 0:
+                start_x = self.margin_size
+                end_x = self.eval_wd.shape[1] + self.margin_size
+
+            img_sized_with_wd[start_y:end_y, start_x:end_x, :] = self.eval_wd
+
+        return img_sized_with_wd
+
+    def cal_chongdie(self, box1, box2, x1y1x2y2=False):
+        if x1y1x2y2:
+            mx = min(box1[0], box2[0])
+            Mx = max(box1[2], box2[2])
+            my = min(box1[1], box2[1])
+            My = max(box1[3], box2[3])
+            w1 = box1[2] - box1[0]
+            h1 = box1[3] - box1[1]
+            w2 = box2[2] - box2[0]
+            h2 = box2[3] - box2[1]
+        else:
+            mx = min(box1[0] - box1[2] / 2.0, box2[0] - box2[2] / 2.0)
+            Mx = max(box1[0] + box1[2] / 2.0, box2[0] + box2[2] / 2.0)
+            my = min(box1[1] - box1[3] / 2.0, box2[1] - box2[3] / 2.0)
+            My = max(box1[1] + box1[3] / 2.0, box2[1] + box2[3] / 2.0)
+            w1 = box1[2]
+            h1 = box1[3]
+            w2 = box2[2]
+            h2 = box2[3]
+        uw = Mx - mx
+        uh = My - my
+        cw = w1 + w2 - uw
+        ch = h1 + h2 - uh
+        area1 = w1 * h1
+        if cw <= 0 or ch <= 0:
+            carea = 0
+        else:
+            carea = cw * ch
+        return carea / area1
+
+    def eval_load_wd(self, wd_path):
+        wd_img = cv2.imread(wd_path, 1)
+        if wd_img.shape[0] != self.wd_size and wd_img.shape[1] != self.wd_size:
+            wd_img = cv2.resize(wd_img, (self.wd_size, self.wd_size))
+        wd_img = cv2.cvtColor(wd_img, cv2.COLOR_BGR2RGB)
+        self.eval_wd = wd_img
+        print(f'Load Woodpecker for eval: {wd_path}')
+        pass
+
+    def init_dataloader(self):
+        train_dataset = WdYoloRDataset(self.cfg.benign_root, self.cfg.adversarial_root, self.cfg.benign_label_root, self.img_size)
+        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=True, num_workers=self.cfg.num_works, drop_last=True)
+        self.data_loader = train_loader
+        pass
+
+    def save_wd(self, epoch):
+        wd_img_RGB = transforms.ToPILImage('RGB')(self.wd_tensor)
+        wd_img_RGB = np.array(wd_img_RGB).astype(np.uint8)
+        wd_img_BGR = cv2.cvtColor(wd_img_RGB, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(os.path.join(f'{self.wd_save_path}', f'wd_{str(epoch).zfill(3)}.png'), wd_img_BGR)
+        del wd_img_BGR
+        pass
+
+    def init_woodpecker(self):
+        wd_img = np.random.randint(0, 255, (3, self.wd_size, self.wd_size)) / 255.
+        wd_tensor = torch.from_numpy(wd_img)
+        self.wd_tensor = wd_tensor.requires_grad_(True)
+        fold_name = f'wd_{self.cfg.defensive_patch_location}_{self.cfg.attack_name}_{self.cfg.detect_name}_{self.cfg.weight}_{self.cfg.batch_size}'
+        wd_fold = f'exp_{self.cfg.data_name}_{self.wd_size}_{self.cfg.epoch}'
+        self.wd_save_path = os.path.join('./FJNTraining', fold_name, wd_fold)
+        os.makedirs(self.wd_save_path, exist_ok=True)
+        self.save_wd(0)
+        del wd_img
+        pass
+
+
+
+
+def get_args():
+    Gparser = argparse.ArgumentParser(description='Combination of Canary and Woodpecker')
+    Gparser.add_argument('--detect_name', default='yolor', type=str, help='')
+    Gparser.add_argument('--attack_name', default='fool', type=str, help='', choices=['fool', 'advtext', 'upc', 'natural'])
+    Gparser.add_argument('--weight', default=1.0, type=float, help='weight of benign loss')
+    Gparser.add_argument('--epoch', default=50, type=int, help='epoch for train')
+    Gparser.add_argument('--learing_rate', default=0.05, type=float, help='batch_size for training')
+    Gparser.add_argument('--epoch_save', default=1, type=int, help='epoch for save model and canary')
+    Gparser.add_argument('--img_size', default=1280, type=int)
+    Gparser.add_argument('--data_name', default='VOC07_120', type=str, help='')
+    Gparser.add_argument('--benign_root', default="Data/traineval/VOC07_YOLOR/train_120_960_1280/benign", type=str)
+    Gparser.add_argument('--benign_label_root', default="Data/traineval/VOC07_YOLOR/train_120_960_1280/benign_label_person", type=str)
+    Gparser.add_argument('--adversarial_root', default="Data/traineval/VOC07_YOLOR/train_120_960_1280/adversarial", type=str)
+    Gparser.add_argument('--batch_size', default=3, type=int, help='batch_size for training')
+    Gparser.add_argument('--num_works', default=5, type=int, help='num_works')
+    Gparser.add_argument('--shuffle', action='store_true', default=True, help='options :True or False')
+    Gparser.add_argument('--max_label', default=20, type=int, help='max_label')
+    Gparser.add_argument('--person_conf', default=0.05, type=float, help='person_conf')
+    Gparser.add_argument('--overlap_thresh', default=0.4, type=float, help='overlap_thresh')
+    Gparser.add_argument('--defensive_patch_location', default='cc', type=str, help='defensive patch location', choices=['uc', 'cl', 'cr', 'bc', 'cc'])
+    Gparser.add_argument('--eval_no_overlap', action='store_true', default=True, help='eval_no_overlap')
+    Gparser.add_argument('--margin_size', default=40, type=int, help='margin size')
+    Gparser.add_argument('--canary_init', action='store_true', default=True, help='canary_init')
+    Gparser.add_argument('--canary_init_path', default='./Data/InitImages/', type=str, help='canary label')
+    Gparser.add_argument('--canary_cls_id', default=22, type=int, help='canary label')
+    Gparser.add_argument('--canary_size', default=120, type=int, help='canary size')
+    Gparser.add_argument('--wd_size', default=140, type=int, help='wd size')
+    Gparser.add_argument('--train', action='store_true', help='train')
+    Gparser.add_argument('--test', action='store_true', help='test')
+    Gparser.add_argument('--seed', default=301, type=int, help='choose seed')
+    Gparser.add_argument('--faster', action='store_true', default=False, help='faster')
+    Gparser.add_argument('--gpu_id', default=0, type=int, help='choose gpu')
+    Gparser.add_argument('--df_mode', default='C', type=str, help='select df_patch', choices=['C', 'W', 'A'])
+    Gparser.add_argument('--input_img', default='', type=str, help='the patch of input img')
+    Gparser.add_argument('--best_canary_path', default='./trained_dfpatches/YOLOR/canary.png', type=str, help='the patch of best_canary')
+    Gparser.add_argument('--best_wd_path', default='./trained_dfpatches/YOLOR/wd.png', type=str, help='the patch of best_wd')
+    return Gparser.parse_known_args()[0]
+
+
+def freeze_seed(seed=1):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+'''
+python YOLOR_Combiner.py --train --df_mode C --defensive_patch_location cc --canary_cls_id 22 --canary_size 120 --person_conf 0.05 --weight 2.0
+python YOLOR_Combiner.py --train --df_mode W --defensive_patch_location cc --wd_size 140 --person_conf 0.05 --weight 1.0
+
+
+python YOLOR_Combiner.py --test --df_mode C --defensive_patch_location cc --canary_cls_id 22 --canary_size 120 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOR/canary.png --input_img XXX
+python YOLOR_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_size 140 --person_conf 0.05 --best_wd_path ./trained_dfpatches/YOLOR/wd.png --input_img XXX
+python YOLOR_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 22 --canary_size 120 --wd_size 140 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOR/canary.png --best_wd_path ./trained_dfpatches/YOLOR/wd.png --input_img XXX
+
+'''
+
+if __name__ == '__main__':
+    cfg = get_args()
+    freeze_seed(cfg.seed)
+    os.environ['CUDA_VISIBLE_DEVICES'] = f'{cfg.gpu_id}'
+    detector = FJN_YOLOR()
+    
+    if cfg.train:
+        if cfg.df_mode == 'C':
+            canary = Canary(cfg, detector)
+            canary.init_dataloader()
+            canary.init_canary()
+            canary.train()
+            pass
+        if cfg.df_mode == 'W':
+            woodpecker = Woodpecker(cfg, detector)
+            woodpecker.init_dataloader()
+            woodpecker.init_woodpecker()
+            woodpecker.train()
+            pass
+        pass
+    if cfg.test:
+        
+        if cfg.df_mode == 'C' or cfg.df_mode == 'A' :
+            canary = Canary(cfg, detector)
+            canary.eval_load_canary(canary_path=cfg.best_canary_path, canary_cls_id=cfg.canary_cls_id)
+        if cfg.df_mode == 'W' or cfg.df_mode == 'A' :
+            woodpecker = Woodpecker(cfg, detector)
+            woodpecker.eval_load_wd(wd_path=cfg.best_wd_path)
+        img_sized = cv2.imread(cfg.input_img, 1)
+        img_sized = cv2.resize(img_sized, (detector.model.width, detector.model.height))
+        
+        if cfg.df_mode == 'C':
+            is_attack = canary.eval_single(img_sized)
+        elif cfg.df_mode == 'W':
+            is_attack = woodpecker.eval_single(img_sized)
+        elif cfg.df_mode == 'A':
+            is_attack = canary.eval_single(img_sized)
+            if not is_attack:
+                is_attack = woodpecker.eval_single(img_sized)
+        if is_attack:
+            print('detect adversarial attack!')
+        else:
+            print('not detect adversarial attack!')
