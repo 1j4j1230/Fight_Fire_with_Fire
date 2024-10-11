@@ -13,7 +13,7 @@ The code is tested with PyTorch 1.12.1. The complete list of required packages a
 The links of datasets can be found in /datasets/README.md.
 
 ## Usage
-
+Download files and weights of object detectors from https://drive.google.com/file/d/1bjiYFo9wWhSKID_eXZlfMvgQRKDShMD2/view?usp=sharing and put them in ./ObjectDetector/
 
 
 #### Faster R-CNN
@@ -124,8 +124,6 @@ python YOLOv8_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_
 
 python YOLOv8_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 22 --canary_size 80 --wd_size 80 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv8/canary.png --best_wd_path ./trained_dfpatches/YOLOv8/wd.png --input_img XXX
 ```
-
-![image](assets/effective_analysis_cawd.png)
 
 
 If anything is unclear, please open an issue or contact Jianan Feng ([jiananfeng@ruc.edu.cn](mailto:jiananfeng@ruc.edu.cn)).
