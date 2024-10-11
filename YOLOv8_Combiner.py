@@ -330,7 +330,7 @@ class Canary:
 
     def eval_single(self, img_cv_ori):
         img_cv = copy.deepcopy(img_cv_ori)
-        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20, shown=shown)[0]
+        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20)[0]
         if (img_cv.shape[0] != self.img_size or img_cv.shape[1] != self.img_size):
             img_sized = cv2.resize(img_cv, (self.cfg.img_size, self.cfg.img_size))
         else:
@@ -486,7 +486,7 @@ class Woodpecker:
         pass
 
     def eval_single(self, img_cv):
-        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20, shown=shown)[0]
+        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20)[0]
         if (img_cv.shape[0] != self.img_size or img_cv.shape[1] != self.img_size):
             img_sized = cv2.resize(img_cv, (self.cfg.img_size, self.cfg.img_size))
         else:
@@ -582,7 +582,7 @@ def get_args():
     Gparser.add_argument('--defensive_patch_location', default='cc', type=str, help='defensive patch location', choices=['uc', 'cl', 'cr', 'bc', 'cc'])
     Gparser.add_argument('--eval_no_overlap', action='store_true', default=True, help='eval_no_overlap')
     Gparser.add_argument('--overlap_thresh', default=0.4, type=float, help='overlap_thresh')
-    Gparser.add_argument('--canary_init_path', default='Data/InitImages/', type=str, help='canary init image')
+    Gparser.add_argument('--canary_init_path', default='InitImages/', type=str, help='canary init image')
     Gparser.add_argument('--canary_init', action='store_true', default=True, help='options :True or False')
     Gparser.add_argument('--canary_cls_id', default=22, type=int, help='canary label')
     Gparser.add_argument('--canary_size', default=80, type=int, help='canary size')
@@ -609,6 +609,7 @@ python YOLOv8_Combiner.py --train --df_mode W --defensive_patch_location cc --wd
 python YOLOv8_Combiner.py --test --df_mode C --defensive_patch_location cc --canary_cls_id 22 --canary_size 80 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv8/canary.png --input_img XXX
 python YOLOv8_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_size 80 --person_conf 0.05 --best_wd_path ./trained_dfpatches/YOLOv8/wd.png --input_img XXX
 python YOLOv8_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 22 --canary_size 80 --wd_size 80 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv8/canary.png --best_wd_path ./trained_dfpatches/YOLOv8/wd.png --input_img XXX
+
 '''
 
 

@@ -15,7 +15,6 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torch.utils.data import Dataset
 from ObjectDetector.fjn_yolov2 import *
-from yolov2_normal_PossibleAreas import FindHiddenPerson
 
 def freeze_seed(seed=1):
     torch.manual_seed(seed)
@@ -150,7 +149,7 @@ def add_defensive_patch_into_img_tensor(cfg, detector, img_tensor, df_patch_tens
                     raise Exception('add_defensive_patch_into_img_tensor: no such defensive_patch_location: x ', cfg.defensive_patch_location)
                 end_x = start_x + df_patch_tensor.shape[-2]
                 end_y = start_y + df_patch_tensor.shape[-1]
-                if cfg.command == 'train':
+                if cfg.train:
                     shift_x = random.randint(-10, 10)
                     shift_y = random.randint(-10, 10)
                     start_y, end_y = start_y + shift_y, end_y + shift_y
@@ -220,6 +219,73 @@ def add_defensive_patch_into_img_cv(cfg, possible_person_ls, img_cv_in, df_patch
     else:
         return img_cv
 
+def box_in_another_box(single_box_original_person, single_box_all_person):
+    bool_x_in_left = (single_box_original_person[0] - single_box_original_person[2] / 2) < single_box_all_person[0]
+    if not bool_x_in_left:
+        return False
+
+    bool_x_in_right = single_box_all_person[0] < (single_box_original_person[0] + single_box_original_person[2] / 2)
+    if not bool_x_in_right:
+        return False
+
+    bool_y_in_top = (single_box_original_person[1] - single_box_original_person[3] / 2) < single_box_all_person[1]
+    if not bool_y_in_top:
+        return False
+
+    bool_y_in_bottom = single_box_all_person[1] < (single_box_original_person[1] + single_box_original_person[3] / 2)
+    if not bool_y_in_bottom:
+        return False
+
+    return True
+
+def FindHiddenPerson(detector, img, person_conf=0.05, overlap_thresh=0.4):
+    box_all_person, box_original_obj = detector.detect_person_and_original(img, person_conf=person_conf, faster=True)
+    box_original_person = box_original_obj[np.where(box_original_obj[:, -1] == 0)]
+    box_all_person_overlap = []
+    if len(box_original_person) > 0:
+        for single_box_all_person in box_all_person:
+            boo_is_overlap = False
+            for single_box_original_person in box_original_person:
+                if box_in_another_box(single_box_original_person, single_box_all_person):
+                    boo_is_overlap = True
+                    break
+                if cal_overlap(single_box_all_person[:4], single_box_original_person[:4], x1y1x2y2=False) >= overlap_thresh:
+                    boo_is_overlap = True
+                    break
+            if not boo_is_overlap:
+                box_all_person_overlap.append(single_box_all_person)
+    else:
+        box_all_person_overlap = box_all_person
+    new_box_all_person_overlap = []
+    for single_box_person_overlap in box_all_person_overlap:
+        bool_tmp_is_defense_overlap = False
+        for single_original_person_box in box_original_person:
+            tmp_overlap_area = cal_overlap_only([min(max(single_box_person_overlap[0], 0.131), 0.868), min(max(single_box_person_overlap[1], 0.131), 0.868), 0.098, 0.098], single_original_person_box, x1y1x2y2=False)
+            if tmp_overlap_area / (0.098 * 0.098) > 0.3:
+                bool_tmp_is_defense_overlap = True
+
+        if not bool_tmp_is_defense_overlap:
+            new_box_all_person_overlap.append(single_box_person_overlap)
+            pass
+        pass
+    if len(new_box_all_person_overlap) > 0:
+        new_all_person_boxes = np.array(new_box_all_person_overlap)
+        new_all_person_xyxy_boxes = xywh2xyxy_np(new_all_person_boxes[:, :4])
+        new_all_person_xyxy_boxes = np.minimum(np.maximum(new_all_person_xyxy_boxes, 0), 1.0)
+        person_groups_xyxy = divid_person_group(new_all_person_xyxy_boxes)
+        hidden_xywh = xyxy2xywh_np(person_groups_xyxy)
+        hidden_box = []
+        for hidden_xywh_item in hidden_xywh:
+            if hidden_xywh_item[2]>0.05 and hidden_xywh_item[3]>0.05:
+                hidden_box_single = np.zeros((7))
+                hidden_box_single[:4] = hidden_xywh_item
+                hidden_box.append(hidden_box_single)
+        hidden_box = np.array( hidden_box )
+        hidden_xywh = hidden_box
+    else:
+        hidden_xywh = np.array([])
+
+    return hidden_xywh
 
 class Woodpecker():
     def __init__(self, cfg, detector):
@@ -548,7 +614,7 @@ def get_args():
     Gparser.add_argument('--defensive_patch_size', default=60, type=int, help='defensive patch size')
     Gparser.add_argument('--defensive_patch_clip', action='store_true', default=False, help='options :True or False')
     Gparser.add_argument('--defensive_patch_location', default='cc', type=str, help='defensive patch location', choices=['uc', 'cl', 'cr', 'bc', 'cc'])
-    Gparser.add_argument('--canary_init_path', default='Data/InitImages/', type=str, help='canary init image')
+    Gparser.add_argument('--canary_init_path', default='InitImages/', type=str, help='canary init image')
     Gparser.add_argument('--canary_init', action='store_true', default=True, help='options :True or False')
     Gparser.add_argument('--canary_cls_id', default=22, type=int, help='canary label')
     Gparser.add_argument('--ca_size', default=60, type=int, help='defensive patch size')
@@ -557,6 +623,8 @@ def get_args():
     Gparser.add_argument('--seed', default=301, type=int, help='choose seed')
     Gparser.add_argument('--df_mode', default='C', type=str, help='select df_patch', choices=['C', 'W', 'A'])
     Gparser.add_argument('--gpu_id', default=0, type=int, help='choose gpu')
+    Gparser.add_argument('--train', action='store_true', help='train')
+    Gparser.add_argument('--test', action='store_true', help='test')
     Gparser.add_argument('--input_img', default='', type=str, help='the patch of input img')
     Gparser.add_argument('--best_canary_path', default='./trained_dfpatches/YOLOv2/canary.png', type=str, help='the patch of best_canary')
     Gparser.add_argument('--best_wd_path', default='./trained_dfpatches/YOLOv2/wd.png', type=str, help='the patch of best_wd')
@@ -570,6 +638,7 @@ python YOLOv2_Combiner.py --train --df_mode W --defensive_patch_location cc --wd
 python YOLOv2_Combiner.py --test --df_mode C --defensive_patch_location cc --canary_cls_id 22 --ca_size 60 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv2/canary.png --input_img XXX
 python YOLOv2_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_size 60 --person_conf 0.05 --best_wd_path ./trained_dfpatches/YOLOv2/wd.png --input_img XXX
 python YOLOv2_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 22 --ca_size 60 --wd_size 60 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv2/canary.png --best_wd_path ./trained_dfpatches/YOLOv2/wd.png --input_img XXX
+
 '''
 
 if __name__ == '__main__':

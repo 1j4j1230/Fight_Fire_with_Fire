@@ -1,4 +1,4 @@
-reformat_canary_location_xyxy(import os
+import os
 import cv2
 import torch
 import random
@@ -294,8 +294,8 @@ class Canary:
                 benign_box_l, benign_obj_l, benign_cls_l = compute_loss(benign_outputs, benign_label_clsxywh, self.detector.model)
                 adv_outputs = self.detector.model(adv_input_canary_tensor)
                 adv_hidden_box_l, adv_hidden_obj_l, adv_hidden_cls_l = compute_loss(adv_outputs, adv_label_clsxywh, self.detector.model)
-                benign_loss = benign_obj_l + benign_cls_l
-                adv_loss = adv_hidden_obj_l + adv_hidden_cls_l
+                benign_loss = benign_obj_l + benign_cls_l + benign_box_l
+                adv_loss = adv_hidden_obj_l + adv_hidden_cls_l + adv_hidden_box_l
                 loss = self.cfg.weight * benign_loss - adv_loss
                 loss.backward()
                 optimizer.step()
@@ -354,7 +354,7 @@ class Canary:
         return cx, cy, cw, ch
 
     def eval_single(self, img_cv):
-        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20, shown=shown)
+        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20)
         if (img_cv.shape[0] != self.img_size or img_cv.shape[1] != self.img_size):
             img_sized = cv2.resize(img_cv, (self.cfg.img_size, self.cfg.img_size))
         else:
@@ -562,13 +562,16 @@ class Woodpecker:
                 benign_input_wd_tensor, benign_wd_clsxywh = add_defensivepatch_into_tensor(self.detector, self.cfg, benign_input_tensor, self.wd_tensor, random_palce=True)
                 benign_label_clsxywh = wd_reformat_to_label(original_label=benign_label).cuda()
                 self.detector.model.train()
+                
                 benign_outputs = self.detector.model(benign_input_wd_tensor)
                 benign_box_l, benign_obj_l, benign_cls_l = compute_loss(benign_outputs, benign_label_clsxywh, self.detector.model)
                 adv_outputs = self.detector.model(adv_input_wd_tensor)
                 adv_hidden_box_l, adv_hidden_obj_l, adv_hidden_cls_l = compute_loss(adv_outputs, benign_label_clsxywh, self.detector.model)
-                benign_loss = benign_obj_l + benign_cls_l
-                adv_loss = adv_hidden_obj_l + adv_hidden_cls_l
+                benign_loss = benign_obj_l + benign_cls_l + benign_box_l
+                adv_loss = adv_hidden_obj_l + adv_hidden_cls_l + adv_hidden_box_l
                 loss = self.cfg.weight * benign_loss + adv_loss
+                loss.requires_grad_(True)
+                
                 loss.backward()
                 optimizer.step()
                 optimizer.zero_grad()
@@ -592,7 +595,7 @@ class Woodpecker:
         pass
 
     def eval_single(self, img_cv):
-        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20, shown=shown)
+        possible_person_ls = self.detector.FindHiddenPerson(deepcopy(img_cv), person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20)
         if (img_cv.shape[0] != self.img_size or img_cv.shape[1] != self.img_size):
             img_sized = cv2.resize(img_cv, (self.cfg.img_size, self.cfg.img_size))
         else:
@@ -733,10 +736,10 @@ def get_args():
     Gparser.add_argument('--learing_rate', default=0.05, type=float, help='batch_size for training')
     Gparser.add_argument('--epoch_save', default=1, type=int, help='epoch for save model and canary')
     Gparser.add_argument('--img_size', default=416, type=int)
-    Gparser.add_argument('--data_name', default='VOC07_60_All_Hidden', type=str, help='')
-    Gparser.add_argument('--benign_root', default="Data/traineval/VOC07_YOLOv4/train_60_All_hidden/benign", type=str)
-    Gparser.add_argument('--benign_label_root', default="Data/traineval/VOC07_YOLOv4/train_60_All_hidden/benign_label", type=str)
-    Gparser.add_argument('--adversarial_root', default="Data/traineval/VOC07_YOLOv4/train_60_All_hidden/adversarial", type=str)
+    Gparser.add_argument('--data_name', default='VOC07_60', type=str, help='')
+    Gparser.add_argument('--benign_root', default="Data/traineval/VOC07_YOLOv4/train_60/benign", type=str)
+    Gparser.add_argument('--benign_label_root', default="Data/traineval/VOC07_YOLOv4/train_60/benign_label", type=str)
+    Gparser.add_argument('--adversarial_root', default="Data/traineval/VOC07_YOLOv4/train_60/adversarial", type=str)
     Gparser.add_argument('--batch_size', default=5, type=int, help='batch_size for training')
     Gparser.add_argument('--num_works', default=5, type=int, help='num_works')
     Gparser.add_argument('--margin_size', default=40, type=int, help='margin size')
@@ -744,7 +747,7 @@ def get_args():
     Gparser.add_argument('--defensive_patch_location', default='cc', type=str, help='defensive patch location', choices=['uc', 'cl', 'cr', 'bc', 'cc'])
     Gparser.add_argument('--eval_no_overlap', action='store_true', default=True, help='eval_no_overlap')
     Gparser.add_argument('--overlap_thresh', default=0.4, type=float, help='overlap_thresh')
-    Gparser.add_argument('--canary_init_path', default='Data/InitImages/', type=str, help='canary init image')
+    Gparser.add_argument('--canary_init_path', default='./InitImages/', type=str, help='canary init image')
     Gparser.add_argument('--canary_init', action='store_true', default=True, help='options :True or False')
     Gparser.add_argument('--canary_cls_id', default=22, type=int, help='canary label')
     Gparser.add_argument('--canary_size', default=60, type=int, help='canary size')
@@ -771,6 +774,7 @@ python YOLOv4_Combiner.py --train --df_mode W --defensive_patch_location cc --wd
 python YOLOv4_Combiner.py --test --df_mode C --defensive_patch_location cc --canary_cls_id 22 --canary_size 60 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv4/canary.png --input_img XXX
 python YOLOv4_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_size 60 --person_conf 0.05 --best_wd_path ./trained_dfpatches/YOLOv4/wd.png --input_img XXX
 python YOLOv4_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 22 --canary_size 60 --wd_size 60 --person_conf 0.05 --best_canary_path ./trained_dfpatches/YOLOv4/canary.png --best_wd_path ./trained_dfpatches/YOLOv4/wd.png --input_img XXX
+
 '''
 
 

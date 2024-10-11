@@ -263,7 +263,7 @@ class Canary:
         pass
 
     def eval_single(self, img_cv):
-        possible_person_ls = self.detector.FindHiddenPerson(img_cv, person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20, shown=shown)
+        possible_person_ls = self.detector.FindHiddenPerson(img_cv, person_conf=self.person_conf, overlap_thresh=self.overlap_thresh, faster=self.faster, remove_small_length=20)
         img_sized = letterbox(img_cv, 1280)[0]
         if possible_person_ls is not None and len(possible_person_ls):
             possible_person_ls[:, :4] = scale_coords_np(img_cv.shape, possible_person_ls[:, :4], img_sized.shape).round()
@@ -798,7 +798,7 @@ def get_args():
     Gparser.add_argument('--eval_no_overlap', action='store_true', default=True, help='eval_no_overlap')
     Gparser.add_argument('--margin_size', default=40, type=int, help='margin size')
     Gparser.add_argument('--canary_init', action='store_true', default=True, help='canary_init')
-    Gparser.add_argument('--canary_init_path', default='./Data/InitImages/', type=str, help='canary label')
+    Gparser.add_argument('--canary_init_path', default='./InitImages/', type=str, help='canary label')
     Gparser.add_argument('--canary_cls_id', default=22, type=int, help='canary label')
     Gparser.add_argument('--canary_size', default=120, type=int, help='canary size')
     Gparser.add_argument('--wd_size', default=140, type=int, help='wd size')
@@ -861,17 +861,16 @@ if __name__ == '__main__':
         if cfg.df_mode == 'W' or cfg.df_mode == 'A' :
             woodpecker = Woodpecker(cfg, detector)
             woodpecker.eval_load_wd(wd_path=cfg.best_wd_path)
-        img_sized = cv2.imread(cfg.input_img, 1)
-        img_sized = cv2.resize(img_sized, (detector.model.width, detector.model.height))
+        img_cv = cv2.imread(cfg.input_img, 1)
         
         if cfg.df_mode == 'C':
-            is_attack = canary.eval_single(img_sized)
+            is_attack = canary.eval_single(img_cv)
         elif cfg.df_mode == 'W':
-            is_attack = woodpecker.eval_single(img_sized)
+            is_attack = woodpecker.eval_single(img_cv)
         elif cfg.df_mode == 'A':
-            is_attack = canary.eval_single(img_sized)
+            is_attack = canary.eval_single(img_cv)
             if not is_attack:
-                is_attack = woodpecker.eval_single(img_sized)
+                is_attack = woodpecker.eval_single(img_cv)
         if is_attack:
             print('detect adversarial attack!')
         else:

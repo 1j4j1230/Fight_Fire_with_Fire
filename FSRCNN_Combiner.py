@@ -536,7 +536,7 @@ class Woodpecker:
         wd_img = np.random.randint(0, 255, (3, self.cfg.wd_size, self.cfg.wd_size)) / 255.
         wd_tensor = torch.from_numpy(wd_img)
         self.wd_tensor = wd_tensor.requires_grad_(True)
-        self.wd_save_path = os.path.join('./FJNTraining', 'exp_fsrcnn_train',
+        self.wd_save_path = os.path.join('./FJNTraining', 
                                          f'wd_{self.cfg.attack_name}_{self.cfg.detect_name}_{self.cfg.weight}_{self.cfg.batch_size}',
                                          f'exp_{self.cfg.wd_size}')
         os.makedirs(self.wd_save_path, exist_ok=True)
@@ -553,7 +553,7 @@ def get_args():
     Gparser.add_argument('--attack_name', default='advtext', type=str, help='')
     Gparser.add_argument('--weight', default=1.0, type=float, help='weight of benign loss')
     Gparser.add_argument('--defensive_patch_location', default='cc', type=str, help='defensive patch location', choices=['uc', 'cl', 'cr', 'bc', 'cc'])
-    Gparser.add_argument('--canary_init_path', default='Data/InitImages/FSRCNN/', type=str, help='canary init image')
+    Gparser.add_argument('--canary_init_path', default='InitImages/FSRCNN/', type=str, help='canary init image')
     Gparser.add_argument('--canary_init', action='store_true', default=True, help='options :True or False')
     Gparser.add_argument('--canary_cls_id', default=24, type=int, help='canary label')
     Gparser.add_argument('--canary_size', default=120, type=int, help='canary size')
@@ -600,7 +600,6 @@ python FSRCNN_Combiner.py --train --df_mode W --defensive_patch_location cc --wd
 python FSRCNN_Combiner.py --test --df_mode C --defensive_patch_location cc --canary_cls_id 24 --canary_size 120 --person_conf 0.075 --best_canary_path ./trained_dfpatches/FSRCNN/canary.png --input_img XXX
 python FSRCNN_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_size 120 --person_conf 0.075 --best_wd_path ./trained_dfpatches/FSRCNN/wd.png --input_img XXX
 python FSRCNN_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 24 --canary_size 120 --wd_size 120 --person_conf 0.075 --best_canary_path ./trained_dfpatches/FSRCNN/canary.png --best_wd_path ./trained_dfpatches/FSRCNN/wd.png --input_img XXX
-
 '''
 
 if __name__ == '__main__':
