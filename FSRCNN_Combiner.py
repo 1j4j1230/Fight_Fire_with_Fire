@@ -24,12 +24,11 @@ warnings.filterwarnings('ignore')
 
 
 class CanaryFasterRCNNDataset(Dataset):
-    def __init__(self, clean_root, attack_root, clean_label_root, attacks_adv_label_root, attacks_safe_label_root, canary_size, canary_cls_id):
+    def __init__(self, clean_root, attack_root, clean_hidden_root, attack_hidden_root, canary_size, canary_cls_id):
         self.clean_root = clean_root
-        self.clean_label_root = clean_label_root
+        self.clean_hidden_root = clean_hidden_root
         self.attack_root = attack_root
-        self.attacks_adv_label_root = attacks_adv_label_root
-        self.attacks_safe_label_root = attacks_safe_label_root
+        self.attack_hidden_root = attack_hidden_root
         self.canary_size = canary_size
         self.canary_cls_id = canary_cls_id
         self.img_clean_ls = os.listdir(self.clean_root)
@@ -42,24 +41,26 @@ class CanaryFasterRCNNDataset(Dataset):
     def __getitem__(self, idx):
         clean_img_name = self.img_clean_ls[idx % self.img_ls_len]
         attack_img_name = self.img_attack_ls[idx % self.img_ls_len]
+        
         img_clean_path = os.path.join(self.clean_root, clean_img_name)
         img_clean_input = cv2.imread(img_clean_path, 1)
         img_clean_input = cv2.cvtColor(img_clean_input, cv2.COLOR_BGR2RGB)
         img_clean_tensor = torch.from_numpy(img_clean_input.transpose(2, 0, 1)).float().div(255.0)
-        label_clean_path = os.path.join(self.clean_label_root, os.path.splitext(clean_img_name)[0] + '.txt')
+        
+        label_clean_path = os.path.join(self.clean_hidden_root, os.path.splitext(clean_img_name)[0] + '.txt')
         label_img_clean = np.loadtxt(label_clean_path)
         label_img_clean = self.process_lab(label_img_clean)
+        
         img_attack_path = os.path.join(self.attack_root, attack_img_name)
         img_attack_input = cv2.imread(img_attack_path, 1)
         img_attack_input = cv2.cvtColor(img_attack_input, cv2.COLOR_BGR2RGB)
         img_attack_tensor = torch.from_numpy(img_attack_input.transpose(2, 0, 1)).float().div(255.0)
-        label_attack_adv_path = os.path.join(self.attacks_adv_label_root, os.path.splitext(attack_img_name)[0] + '.txt')
-        label_attack_adv = np.loadtxt(label_attack_adv_path)
-        label_attack_adv = self.process_lab(label_attack_adv)
-        label_attack_safe_path = os.path.join(self.attacks_safe_label_root, os.path.splitext(attack_img_name)[0] + '.txt')
-        label_attack_safe = np.loadtxt(label_attack_safe_path)
-        label_attack_safe = self.process_lab(label_attack_safe)
-        return img_clean_tensor, img_attack_tensor, label_img_clean, label_attack_adv, label_attack_safe
+        
+        label_attack_path = os.path.join(self.attack_hidden_root, os.path.splitext(attack_img_name)[0] + '.txt')
+        label_img_attack = np.loadtxt(label_attack_path)
+        label_img_attack = self.process_lab(label_img_attack)
+        
+        return img_clean_tensor, img_attack_tensor, label_img_clean, label_img_attack
 
     def process_lab(self, lab):
         label = lab
@@ -94,13 +95,13 @@ class Canary:
         for epoch in range(1, cfg.epoch + 1):
             t.set_description((f'canary_{self.cfg.attack_name}_{self.cfg.detect_name}_{cfg.weight} epoch: {epoch}/{self.cfg.epoch}'))
 
-            for i_batch, (benign_input_tensor, attack_input_tensor, img_benign_label, label_attack_adv, label_attack_safe) in enumerate(self.data_loader):
+            for i_batch, (benign_input_tensor, attack_input_tensor, img_benign_label, img_label_attack) in enumerate(self.data_loader):
                 benign_input_tensor = benign_input_tensor.requires_grad_(False).to(self.device)
                 attack_input_tensor = attack_input_tensor.requires_grad_(False).to(self.device)
 
                 benign_input_canary_tensor = self.add_canary_into_img_tensor(benign_input_tensor, img_benign_label)
-                attack_input_canary_tensor = self.add_canary_into_img_tensor(attack_input_tensor, label_attack_adv)
-                attack_input_canary_tensor = self.add_canary_into_img_tensor(attack_input_canary_tensor, label_attack_safe)
+                attack_input_canary_tensor = self.add_canary_into_img_tensor(attack_input_tensor, img_label_attack)
+                
                 loss_all = 0
 
                 if img_benign_label.shape[1] > 0:
@@ -109,18 +110,15 @@ class Canary:
                     losses_benign = sum(loss for loss in loss_dict_benign.values())
                     loss_all = loss_all + self.cfg.weight * losses_benign
 
-                if label_attack_adv.shape[1] > 0:
-                    adv_attack_target = [{"boxes": ssl[:, 1:5].to(self.device), "labels":ssl[:,0].long().to(self.device)  } for ssl in label_attack_adv]
+                if img_label_attack.shape[1] > 0:
+                    adv_attack_target = [{"boxes": ssl[:, 1:5].to(self.device), "labels":ssl[:,0].long().to(self.device)  } for ssl in img_label_attack]
                     loss_dict_adv_attack = self.detector.detector(attack_input_canary_tensor, adv_attack_target)
                     losses_adv_attack = sum(loss for loss in loss_dict_adv_attack.values())
                     loss_all = loss_all - losses_adv_attack
 
-                if label_attack_safe.shape[1] > 0:
-                    adv_safe_target = [{"boxes": ssl[:, 1:5].to(self.device), "labels": ssl[:, 0].long().to(self.device)} for ssl in label_attack_safe]
-                    loss_dict_adv_safe = self.detector.detector(attack_input_canary_tensor, adv_safe_target)
-                    losses_adv_safe = sum(loss for loss in loss_dict_adv_safe.values())
-                    loss_all = loss_all - losses_adv_safe
-
+                if loss_all == 0:
+                    continue
+                
                 optimizer.zero_grad()
                 loss_all.backward()
                 optimizer.step()
@@ -268,7 +266,7 @@ class Canary:
         pass
 
     def init_dataloader(self):
-        train_dataset = CanaryFasterRCNNDataset(self.cfg.clean_root, self.cfg.attack_root, self.cfg.clean_label_root, self.cfg.attacks_adv_label_root, self.cfg.attacks_safe_label_root, self.cfg.canary_size, self.cfg.canary_cls_id)
+        train_dataset = CanaryFasterRCNNDataset(self.cfg.clean_root, self.cfg.attack_root, self.cfg.clean_hidden_root, self.cfg.attack_hidden_root, self.cfg.canary_size, self.cfg.canary_cls_id)
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=True, num_workers=self.cfg.num_works)
         self.data_loader = train_loader
         pass
@@ -290,10 +288,16 @@ class Canary:
         self.save_canary(0)
         pass
 
+
 class WoodpeckerFasterRCNNDataset(Dataset):
-    def __init__(self, attack_root, attacks_label_root):
+    def __init__(self, clean_root, attack_root, clean_hidden_root, attack_hidden_root, attack_label_root, wd_size):
+        self.clean_root = clean_root
         self.attack_root = attack_root
-        self.attacks_label_root = attacks_label_root
+        self.clean_hidden_root = clean_hidden_root
+        self.attack_hidden_root = attack_hidden_root
+        self.attack_label_root = attack_label_root
+        self.wd_size = wd_size
+        self.img_clean_ls = os.listdir(self.clean_root)
         self.img_attack_ls = os.listdir(self.attack_root)
         self.img_ls_len = len(self.img_attack_ls)
 
@@ -301,22 +305,40 @@ class WoodpeckerFasterRCNNDataset(Dataset):
         return self.img_ls_len
 
     def __getitem__(self, idx):
+        clean_img_name = self.img_clean_ls[idx % self.img_ls_len]
         attack_img_name = self.img_attack_ls[idx % self.img_ls_len]
+        
+        img_clean_path = os.path.join(self.clean_root, clean_img_name)
+        img_clean_input = cv2.imread(img_clean_path, 1)
+        img_clean_input = cv2.cvtColor(img_clean_input, cv2.COLOR_BGR2RGB)
+        img_clean_tensor = torch.from_numpy(img_clean_input.transpose(2, 0, 1)).float().div(255.0)
+        
+        label_clean_hidden_path = os.path.join(self.clean_hidden_root, os.path.splitext(clean_img_name)[0] + '.txt')
+        label_clean_hidden = np.loadtxt(label_clean_hidden_path)
+        label_clean_hidden = self.process_lab(label_clean_hidden)
+        
+        label_clean_path = os.path.join(self.attack_label_root, os.path.splitext(clean_img_name)[0] + '.txt')
+        label_clean = np.loadtxt(label_clean_path)
+        label_clean = self.process_lab(label_clean)
+        
         img_attack_path = os.path.join(self.attack_root, attack_img_name)
         img_attack_input = cv2.imread(img_attack_path, 1)
         img_attack_input = cv2.cvtColor(img_attack_input, cv2.COLOR_BGR2RGB)
         img_attack_tensor = torch.from_numpy(img_attack_input.transpose(2, 0, 1)).float().div(255.0)
-        label_attack_shown_path = os.path.join(self.attacks_label_root, os.path.splitext(attack_img_name)[0] + '.txt')
-        label_attack_shown = np.loadtxt(label_attack_shown_path)
-        label_attack_shown = self.process_lab(label_attack_shown)
-        return img_attack_tensor, label_attack_shown
+        
+        label_attack_hidden_path = os.path.join(self.attack_hidden_root, os.path.splitext(attack_img_name)[0] + '.txt')
+        label_attack_hidden = np.loadtxt(label_attack_hidden_path)
+        label_attack_hidden = self.process_lab(label_attack_hidden)
+        
+        return img_clean_tensor, img_attack_tensor, label_clean_hidden, label_attack_hidden, label_clean
 
     def process_lab(self, lab):
         label = lab
         if len(lab):
             if len(label.shape) == 1:
                 label = label[np.newaxis, :]
-            label[:, 0] = 1
+            label[:,1], label[:,3] = (label[:,1] + label[:,3])//2 - self.wd_size // 2, (label[:,1] + label[:,3])//2 + self.wd_size // 2
+            label[:,2], label[:,4] = (label[:,2] + label[:,4])//2 - self.wd_size // 2, (label[:,2] + label[:,4])//2 + self.wd_size // 2
         return label
 
 
@@ -340,19 +362,38 @@ class Woodpecker:
         t = tqdm(total=self.cfg.epoch, ascii=True)
         for epoch in range(1, cfg.epoch + 1):
             t.set_description((f'wd_{self.cfg.attack_name}_{self.cfg.detect_name}_{cfg.weight} epoch: {epoch}/{self.cfg.epoch}'))
-            for i_batch, (img_attack_tensor, label_attack_shown) in enumerate(self.data_loader):
+            for i_batch, (img_benign_tensor, img_attack_tensor, label_benign_hidden, label_attack_hidden, label_benign) in enumerate(self.data_loader):
+                
                 attack_input_tensor = img_attack_tensor.requires_grad_(False).to(self.device)
-                attack_input_wd_tensor = self.add_wd_into_img_tensor(attack_input_tensor, label_attack_shown)
-                attack_target = [{"boxes": ssl[:, 1:5].to(self.device), "labels":ssl[:,0].long().to(self.device)  } for ssl in label_attack_shown]
-                loss_dict_attack = self.detector.detector(attack_input_wd_tensor, attack_target)
-                losses_attack = sum(loss for loss in loss_dict_attack.values())
+                attack_input_wd_tensor = self.add_wd_into_img_tensor(attack_input_tensor, label_attack_hidden)
+                
+                benign_input_tensor = img_benign_tensor.requires_grad_(False).to(self.device)
+                benign_input_wd_tensor = self.add_wd_into_img_tensor(benign_input_tensor, label_benign_hidden)
+                
+                loss_all = 0
+                
+                if label_benign_hidden.shape[1] > 0:
+                    benign_target = [{"boxes": ssl[:, 1:5].to(self.device), "labels":ssl[:,0].long().to(self.device)  } for ssl in label_benign]
+                    loss_dict_benign = self.detector.detector(benign_input_wd_tensor, benign_target)
+                    losses_benign = sum(loss for loss in loss_dict_benign.values())
+                    loss_all = loss_all + self.cfg.weight * losses_benign
+
+                if label_attack_hidden.shape[1] > 0:
+                    adv_attack_target = [{"boxes": ssl[:, 1:5].to(self.device), "labels":ssl[:,0].long().to(self.device)  } for ssl in label_benign]
+                    loss_dict_adv_attack = self.detector.detector(attack_input_wd_tensor, adv_attack_target)
+                    losses_adv_attack = sum(loss for loss in loss_dict_adv_attack.values())
+                    loss_all = loss_all + losses_adv_attack
+
+                if loss_all == 0:
+                    continue
+                
                 optimizer.zero_grad()
-                losses_attack.backward(retain_graph=True)
+                loss_all.backward(retain_graph=True)
                 optimizer.step()
                 self.wd_tensor.requires_grad_(True)
                 self.wd_tensor.data.clamp_(0, 1)
                 t.set_postfix({
-                    'loss_all': '{0:1.5f}'.format(losses_attack / len(self.data_loader))
+                    'loss_all': '{0:1.5f}'.format(loss_all / len(self.data_loader))
                 })
             if epoch % self.cfg.epoch_save == 0:
                 self.save_wd(epoch)
@@ -527,7 +568,7 @@ class Woodpecker:
         return carea / area1
 
     def init_dataloader(self):
-        train_dataset = WoodpeckerFasterRCNNDataset(self.cfg.attack_root, self.cfg.attacks_label_root)
+        train_dataset = WoodpeckerFasterRCNNDataset(self.cfg.clean_root, self.cfg.attack_root, self.cfg.clean_hidden_root, self.cfg.attack_hidden_root, self.cfg.attack_label_root, self.cfg.wd_size)
         train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=self.cfg.batch_size, shuffle=True, num_workers=self.cfg.num_works)
         self.data_loader = train_loader
         pass
@@ -559,12 +600,13 @@ def get_args():
     Gparser.add_argument('--canary_size', default=120, type=int, help='canary size')
     Gparser.add_argument('--wd_size', default=120, type=int, help='canary size')
     Gparser.add_argument('--data_name', default="VOC16", type=str)
+    
     Gparser.add_argument('--clean_root', default="Data/traineval/VOC07_FSRCNN/train16/benign", type=str)
-    Gparser.add_argument('--clean_label_root', default="Data/traineval/VOC07_FSRCNN/train16/benign_label", type=str)
+    Gparser.add_argument('--clean_hidden_root', default="Data/traineval/VOC07_FSRCNN/train16/benign_hidden", type=str)
     Gparser.add_argument('--attack_root', default="Data/traineval/VOC07_FSRCNN/train16/adversarial", type=str)
-    Gparser.add_argument('--attacks_adv_label_root', default="Data/traineval/VOC07_FSRCNN/train16/adversarial_adv_label", type=str)
-    Gparser.add_argument('--attacks_safe_label_root', default="Data/traineval/VOC07_FSRCNN/train16/adversarial_safe_label", type=str)
-    Gparser.add_argument('--attacks_label_root', default="Data/traineval/VOC07_FSRCNN/train16/adversarial_adv_label", type=str)
+    Gparser.add_argument('--attack_hidden_root', default="Data/traineval/VOC07_FSRCNN/train16/adversarial_hidden", type=str)
+    Gparser.add_argument('--attack_label_root', default="Data/traineval/VOC07_FSRCNN/train16/adversarial_label", type=str)
+    
     Gparser.add_argument('--epoch', default=50, type=int, help='epoch for train')
     Gparser.add_argument('--learing_rate', default=0.05, type=float, help='batch_size for training')
     Gparser.add_argument('--epoch_save', default=1, type=int, help='epoch for save model and canary')
@@ -577,6 +619,7 @@ def get_args():
     Gparser.add_argument('--num_works', default=0, type=int, help='num_works')
     Gparser.add_argument('--train', action='store_true', help='train')
     Gparser.add_argument('--test', action='store_true', help='eval')
+    Gparser.add_argument('--make_labs', action='store_true', help='make_labs')
     Gparser.add_argument('--gpu_id', default=0, type=int, help='choose gpu')
     Gparser.add_argument('--df_mode', default='C', type=str, help='select df_patch', choices=['C', 'W', 'A'])
     Gparser.add_argument('--input_img', default='', type=str, help='the patch of input img')
@@ -593,20 +636,52 @@ def freeze_seed(seed=1):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-'''
-python FSRCNN_Combiner.py --train --df_mode C --defensive_patch_location cc --canary_cls_id 24 --canary_size 120 --person_conf 0.075 --weight 2.0
-python FSRCNN_Combiner.py --train --df_mode W --defensive_patch_location cc --wd_size 120 --person_conf 0.075 --weight 1.0
 
-python FSRCNN_Combiner.py --test --df_mode C --defensive_patch_location cc --canary_cls_id 24 --canary_size 120 --person_conf 0.075 --best_canary_path ./trained_dfpatches/FSRCNN/canary.png --input_img XXX
-python FSRCNN_Combiner.py --test --df_mode W --defensive_patch_location cc --wd_size 120 --person_conf 0.075 --best_wd_path ./trained_dfpatches/FSRCNN/wd.png --input_img XXX
-python FSRCNN_Combiner.py --test --df_mode A --defensive_patch_location cc --canary_cls_id 24 --canary_size 120 --wd_size 120 --person_conf 0.075 --best_canary_path ./trained_dfpatches/FSRCNN/canary.png --best_wd_path ./trained_dfpatches/FSRCNN/wd.png --input_img XXX
-'''
+
+
+def make_labs(detector, img_root, txt_root):
+    os.makedirs( txt_root, exist_ok=True )
+    for img_name in os.listdir( img_root ):
+        text_name = img_name.split('.')[0]+'.txt'
+        img_cv = cv2.imread( os.path.join( img_root, img_name ), 1 )
+        original_res, possible_res = detector.detect_for_hidden_person(img_cv)
+        
+        textfile = open(os.path.join( txt_root, text_name ), 'w+')
+        for item in possible_res:
+            # cx, cy = int((item[0] + item[2]) / 2) , int((item[1] + item[3]) / 2)
+            # width, height = int(item[2] - item[0]) , int(item[3] - item[1]) 
+            textfile.write('{} {:.6f} {:.6f} {:.6f} {:.6f}\n'.format(item[-1].item(), item[0].item(), item[1].item(), item[2].item(), item[3].item()))
+        
+        textfile.close()
+        pass
+    pass
+
 
 if __name__ == '__main__':
     cfg = get_args()
     freeze_seed(cfg.seed)
     os.environ['CUDA_VISIBLE_DEVICES'] = f'{cfg.gpu_id}'
     detector = fjn_faster_rcnn()
+    
+    if cfg.make_labs:
+        make_labs(detector, cfg.clean_root, cfg.clean_hidden_root)
+        make_labs(detector, cfg.attack_root, cfg.attack_hidden_root)
+        
+        os.makedirs(cfg.attack_label_root, exist_ok=True)
+        for img_file in os.listdir(cfg.clean_root):
+            if img_file.endswith('.jpg') or img_file.endswith('.jpeg') or img_file.endswith('.png'):
+                name = os.path.splitext(img_file)[0]
+                input_imgs = cv2.imread(os.path.join(cfg.clean_root, img_file), 1)
+                boxes = detector.detect_single_img_cv(input_imgs)
+                textfile = open(os.path.join(cfg.attack_label_root, name + '.txt'), 'w+')
+                for item in boxes:
+                    cx, cy = (item[0] + item[2]) / 2, (item[1] + item[3]) / 2
+                    width, height = (item[2] - item[0]), (item[3] - item[1])
+                    textfile.write('{} {:.6f} {:.6f} {:.6f} {:.6f}\n'.format(item[-1].item(), cx, cy, width, height))
+                textfile.close()
+            pass
+        pass
+    
     
     if cfg.train:
         if cfg.df_mode == 'C':
@@ -632,7 +707,6 @@ if __name__ == '__main__':
             woodpecker = Woodpecker(cfg, detector)
             woodpecker.eval_load_wd(wd_path=cfg.best_wd_path)
         
-        
         img_cv = cv2.imread(cfg.input_img, 1)
         
         if cfg.df_mode == 'C':
@@ -655,3 +729,12 @@ if __name__ == '__main__':
 
 
 
+'''
+
+python FSRCNN_Combiner_New1209.py --make_labs --clean_root Data/traineval/VOC07_FSRCNN/train16/benign --clean_hidden_root Data/traineval/VOC07_FSRCNN/train16/benign_hidden --attack_root Data/traineval/VOC07_FSRCNN/train16/adversarial --attack_hidden_root Data/traineval/VOC07_FSRCNN/train16/adversarial_hidden --attack_label_root Data/traineval/VOC07_FSRCNN/train16/adversarial_label
+
+python FSRCNN_Combiner_New1209.py --train --df_mode C --defensive_patch_location cc --canary_cls_id 24 --canary_size 120 --person_conf 0.075 --weight 2.0
+
+python FSRCNN_Combiner_New1209.py --train --df_mode W --defensive_patch_location cc --wd_size 120 --person_conf 0.075 --weight 1.0
+
+'''
